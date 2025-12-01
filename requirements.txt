@@ -1,0 +1,38 @@
+# Core computer vision & AI
+ultralytics
+opencv-python
+mediapipe
+numpy
+torch
+torchvision
+torchaudio
+
+# Data handling
+pandas
+scikit-learn
+scipy
+
+# Annotation & visualization
+matplotlib
+seaborn
+Pillow
+opencv-contrib-python
+
+# Backend
+fastapi
+uvicorn
+python-multipart
+requests
+
+# Optional frontend / dashboard
+jinja2
+aiofiles
+
+# Database (if using)
+sqlalchemy
+sqlite3
+
+# Utilities
+tqdm
+pydantic
+pyyaml

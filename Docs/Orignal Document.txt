@@ -1,0 +1,60 @@
+# Visual Analytics Scope
+
+## **Project Scope: Custom Workplace Activity Detection with Open-Source AI**
+
+## **Objective**
+
+Develop an AI-powered video analytics system that detects specific employee activities in workplace footage:
+
+- Mobile phone usage
+- People sleeping
+- Clock in/out events
+- Eating at workstations
+- Smoke breaks (outdoor/indoor)
+
+---
+
+## **Key Deliverables**
+
+1. **Custom Object/Activity Detection Models**
+    - Train and deploy AI models (YOLO, OpenCV, Detectron2, or MediaPipe) for the above activities.
+    - Models should work on typical office surveillance footage.
+2. **Data Handling**
+    - Assist with collection, cleaning, and labeling of sample data (images/videos) representing each activity.
+    - Provide guidance on how much data is needed for each detection category.
+3. **System Integration**
+    - Build backend pipeline to process live or recorded video streams.
+    - Integrate with standard IP cameras or local video files.
+4. **User Interface (Optional)**
+    - Simple dashboard to view detections, review flagged events, and configure detection alerts.
+5. **Reporting & Notifications**
+    - Capability to export logs or reports of detected activities.
+    - Optional real-time or periodic notification system for policy violations.
+6. **Deployment & Documentation**
+    - Deploy system on provided server (cloud or on-premise).
+    - Provide usage documentation and installation guide.
+
+---
+
+## **Requirements**
+
+## **Technical**
+
+- Use modern open-source computer vision frameworks (e.g., YOLOv8+, OpenCV, Detectron2, or MediaPipe).
+- Python stack preferred, with containerization (Docker) for easy deployment.
+- Clear code structure and documentation for future maintenance.
+
+## **Integration**
+
+- Connects to existing office cameras or can ingest local video files.
+- Results available via simple web app/dashboard or exportable logs.
+
+---
+
+---
+
+## **Target Timeline**
+
+- Prototype: ?
+- Full MVP (working with all activities): ???
+- Ongoing support: optional/negotiable

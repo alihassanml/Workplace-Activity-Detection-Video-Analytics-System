@@ -11,7 +11,7 @@ import os
 os.environ["CUDA_VISIBLE_DEVICES"] = "-1"
 
 # Load both models
-custom_model = YOLO('models/yolov8s.pt')  # Your custom trained model (smoking, eating, sleeping, phone)
+custom_model = YOLO('models/yolov8s.pt')  # Your custom trained model
 coco_model = YOLO('models/coco_yolov8n.pt')  # Pretrained COCO model
 
 print("Custom model classes:", custom_model.names)
@@ -19,7 +19,6 @@ print("COCO model classes:", coco_model.names)
 
 # Map COCO classes to our main activities
 COCO_TO_ACTIVITY_MAP = {
-    # Food/drink related -> eating
     0: 'person',    # person
     39: 'eating',   # bottle
     40: 'eating',   # wine glass
@@ -38,12 +37,8 @@ COCO_TO_ACTIVITY_MAP = {
     53: 'eating',   # pizza
     54: 'eating',   # donut
     55: 'eating',   # cake
-    
-    # Sleep related -> sleeping
     59: 'sleeping',  # bed
     57: 'sleeping',  # couch
-    
-    # Phone related -> phone
     67: 'phone',     # cell phone
 }
 
@@ -54,14 +49,15 @@ result_queue = Queue(maxsize=2)
 # Tracking data
 tracked_persons = {}
 next_person_id = 1
-ACTIVITIES = ['smoking', 'eating', 'sleeping', 'phone','person']
+ACTIVITIES = ['smoking', 'eating', 'sleeping', 'phone', 'person']
 
 # Time limits for alerts (in seconds)
 TIME_LIMITS = {
-    'phone': 15,      # 15 seconds for phone usage
+    'phone': 15,
     'smoking': None,
     'eating': None,
-    'sleeping': None
+    'sleeping': None,
+    'person': None
 }
 
 CONFIDENCE_THRESHOLDS = {
@@ -74,6 +70,11 @@ CONFIDENCE_THRESHOLDS = {
 
 PLAY_SOUND_ON_START = []
 PLAY_SOUND_ON_TIME_LIMIT = ['phone']
+
+# NEW: Enhanced tracking parameters
+MAX_LOST_FRAMES = 30  # Keep tracking for 30 frames even if not detected
+IOU_THRESHOLD = 0.15  # Lower threshold for better tracking
+CENTER_DISTANCE_THRESHOLD = 150  # Maximum pixel distance for center matching
 
 def calculate_iou(box1, box2):
     """Calculate Intersection over Union between two boxes"""
@@ -95,6 +96,56 @@ def calculate_iou(box1, box2):
     
     return inter_area / union_area if union_area > 0 else 0
 
+def calculate_center_distance(box1, box2):
+    """Calculate distance between centers of two boxes"""
+    x1_center = (box1[0] + box1[2]) / 2
+    y1_center = (box1[1] + box1[3]) / 2
+    x2_center = (box2[0] + box2[2]) / 2
+    y2_center = (box2[1] + box2[3]) / 2
+    
+    return np.sqrt((x1_center - x2_center)**2 + (y1_center - y2_center)**2)
+
+def find_best_match(detection_bbox, tracked_persons, matched_ids):
+    """
+    Find best matching person ID using multiple criteria:
+    1. IoU overlap
+    2. Center distance
+    3. Temporal consistency
+    """
+    best_match_id = None
+    best_score = 0
+    
+    for pid, pdata in tracked_persons.items():
+        if pid in matched_ids:
+            continue
+        
+        # Skip if person was lost too long ago
+        frames_lost = pdata.get('frames_lost', 0)
+        if frames_lost > MAX_LOST_FRAMES:
+            continue
+        
+        # Calculate IoU
+        iou = calculate_iou(detection_bbox, pdata['bbox'])
+        
+        # Calculate center distance
+        center_dist = calculate_center_distance(detection_bbox, pdata['bbox'])
+        
+        # Normalize distance (closer = higher score)
+        dist_score = max(0, 1 - (center_dist / CENTER_DISTANCE_THRESHOLD))
+        
+        # Combined score: weighted average of IoU and distance
+        combined_score = (iou * 0.6) + (dist_score * 0.4)
+        
+        # Bonus for temporal consistency
+        if frames_lost == 0:
+            combined_score *= 1.2
+        
+        if combined_score > best_score and (iou > IOU_THRESHOLD or center_dist < CENTER_DISTANCE_THRESHOLD):
+            best_score = combined_score
+            best_match_id = pid
+    
+    return best_match_id
+
 def format_time(seconds):
     """Format seconds to HH:MM:SS"""
     return str(timedelta(seconds=int(seconds)))
@@ -113,8 +164,10 @@ def play_alert_sound(alert_type):
             print(f"⏰ TIME LIMIT ALERT: Drop sound!")
 
 def detection_thread():
-    """Run YOLO detection in separate thread with dual models"""
+    """Run YOLO detection in separate thread with dual models and improved tracking"""
     global tracked_persons, next_person_id
+    
+    frame_count = 0
     
     while True:
         if not frame_queue.empty():
@@ -122,6 +175,7 @@ def detection_thread():
             if frame is None:
                 break
             
+            frame_count += 1
             current_time = time.time()
             
             # Run custom model detection
@@ -146,19 +200,18 @@ def detection_thread():
                     required_conf = CONFIDENCE_THRESHOLDS.get(class_name, 0.25)
                     if conf >= required_conf:
                         detections[class_name].append({
-                            'bbox': xyxy, 
-                            'conf': conf, 
+                            'bbox': xyxy,
+                            'conf': conf,
                             'source': 'custom',
                             'original_class': class_name
                         })
             
-            # Process COCO model detections and map to activities
+            # Process COCO model detections
             for box in coco_result.boxes:
                 cls = int(box.cls)
                 xyxy = box.xyxy[0].cpu().numpy()
                 conf = float(box.conf)
                 
-                # Map COCO class to activity
                 if cls in COCO_TO_ACTIVITY_MAP:
                     activity = COCO_TO_ACTIVITY_MAP[cls]
                     coco_class_name = coco_model.names[cls]
@@ -166,11 +219,15 @@ def detection_thread():
                     required_conf = CONFIDENCE_THRESHOLDS.get(activity, 0.25)
                     if conf >= required_conf:
                         detections[activity].append({
-                            'bbox': xyxy, 
-                            'conf': conf, 
+                            'bbox': xyxy,
+                            'conf': conf,
                             'source': 'coco',
                             'original_class': coco_class_name
                         })
+            
+            # Mark all existing persons as potentially lost
+            for pid in tracked_persons:
+                tracked_persons[pid]['frames_lost'] = tracked_persons[pid].get('frames_lost', 0) + 1
             
             # Update tracked persons
             current_frame_persons = {}
@@ -180,22 +237,13 @@ def detection_thread():
             for activity_name, activity_detections in detections.items():
                 for detection in activity_detections:
                     det_bbox = detection['bbox']
+                    det_conf = detection['conf']
                     
-                    # Try to match with existing person
-                    matched_id = None
-                    max_iou = 0.3
+                    # Find best matching person using improved algorithm
+                    matched_id = find_best_match(det_bbox, tracked_persons, matched_ids)
                     
-                    for pid, pdata in tracked_persons.items():
-                        if pid in matched_ids:
-                            continue
-                        
-                        iou = calculate_iou(det_bbox, pdata['bbox'])
-                        if iou > max_iou:
-                            max_iou = iou
-                            matched_id = pid
-                    
-                    # Assign ID
                     if matched_id is None:
+                        # Create new person
                         person_id = next_person_id
                         next_person_id += 1
                         
@@ -205,15 +253,20 @@ def detection_thread():
                             'detection_source': detection['source'],
                             'original_class': detection['original_class'],
                             'activities': {act: {
-                                'total_time': 0, 
-                                'start_time': None, 
+                                'total_time': 0,
+                                'start_time': None,
                                 'alerted': False,
-                                'time_limit_alerted': False
+                                'time_limit_alerted': False,
+                                'conf': 0
                             } for act in ACTIVITIES},
-                            'last_seen': current_time
+                            'last_seen': current_time,
+                            'frames_lost': 0,
+                            'frame_count': frame_count
                         }
                         current_frame_persons[person_id]['activities'][activity_name]['start_time'] = current_time
+                        current_frame_persons[person_id]['activities'][activity_name]['conf'] = det_conf
                     else:
+                        # Update existing person
                         person_id = matched_id
                         matched_ids.add(person_id)
                         
@@ -224,20 +277,33 @@ def detection_thread():
                             'detection_source': detection['source'],
                             'original_class': detection['original_class'],
                             'activities': {act: old_data['activities'][act].copy() for act in ACTIVITIES},
-                            'last_seen': current_time
+                            'last_seen': current_time,
+                            'frames_lost': 0,
+                            'frame_count': old_data.get('frame_count', frame_count)
                         }
                         
                         old_activity = old_data['current_activity']
                         
+                        # Stop old activity timer if different
                         if old_activity != activity_name and old_data['activities'][old_activity]['start_time'] is not None:
                             elapsed = current_time - old_data['activities'][old_activity]['start_time']
                             current_frame_persons[person_id]['activities'][old_activity]['total_time'] += elapsed
                             current_frame_persons[person_id]['activities'][old_activity]['start_time'] = None
                         
+                        # Start or continue activity timer
                         if current_frame_persons[person_id]['activities'][activity_name]['start_time'] is None:
                             current_frame_persons[person_id]['activities'][activity_name]['start_time'] = current_time
                             current_frame_persons[person_id]['activities'][activity_name]['alerted'] = False
                             current_frame_persons[person_id]['activities'][activity_name]['time_limit_alerted'] = False
+                        
+                        # Update confidence
+                        current_frame_persons[person_id]['activities'][activity_name]['conf'] = det_conf
+            
+            # Keep recently lost persons (within MAX_LOST_FRAMES)
+            for pid, pdata in tracked_persons.items():
+                if pid not in current_frame_persons and pdata.get('frames_lost', 0) <= MAX_LOST_FRAMES:
+                    current_frame_persons[pid] = pdata.copy()
+                    current_frame_persons[pid]['activities'] = {act: pdata['activities'][act].copy() for act in ACTIVITIES}
             
             # Check time limits
             for person_id, pdata in current_frame_persons.items():
@@ -255,30 +321,39 @@ def detection_thread():
             
             tracked_persons = current_frame_persons
             
-            # Create annotated frame manually
+            # Create annotated frame
             annotated_frame = frame.copy()
             
             # Draw all detections
             for person_id, pdata in tracked_persons.items():
-                bbox = pdata['bbox']
-                x1, y1, x2, y2 = map(int, bbox)
-                activity = pdata['current_activity']
-                source = pdata['detection_source']
-                original_class = pdata['original_class']
-                
-                # Color based on source
-                if source == 'custom':
-                    color = (0, 255, 0)  # Green for custom model
-                else:
-                    color = (255, 0, 0)  # Blue for COCO model
-                
-                # Draw box
-                cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                
-                # Label with mapped activity and original class
-                label = f"{activity.upper()} ({original_class})"
-                cv2.putText(annotated_frame, label, (x1, y1 - 10),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
+                if pdata.get('frames_lost', 0) <= MAX_LOST_FRAMES:
+                    bbox = pdata['bbox']
+                    x1, y1, x2, y2 = map(int, bbox)
+                    activity = pdata['current_activity']
+                    source = pdata['detection_source']
+                    original_class = pdata['original_class']
+                    
+                    # Color based on source
+                    if source == 'custom':
+                        color = (0, 255, 0)  # Green for custom model
+                    else:
+                        color = (255, 0, 0)  # Blue for COCO model
+                    
+                    # Dim color if temporarily lost
+                    frames_lost = pdata.get('frames_lost', 0)
+                    if frames_lost > 0:
+                        alpha = max(0.3, 1 - (frames_lost / MAX_LOST_FRAMES))
+                        color = tuple(int(c * alpha) for c in color)
+                    
+                    # Draw box
+                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
+                    
+                    # Label with mapped activity and original class
+                    label = f"ID:{person_id} {activity.upper()} ({original_class})"
+                    if frames_lost > 0:
+                        label += f" [Lost:{frames_lost}]"
+                    cv2.putText(annotated_frame, label, (x1, y1 - 10),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             
             if result_queue.full():
                 result_queue.get()
@@ -302,12 +377,16 @@ ACTIVITY_COLORS = {
     'eating': (0, 255, 0),
     'sleeping': (255, 0, 255),
     'phone': (0, 165, 255),
-    'person': (128, 128, 128) 
+    'person': (128, 128, 128)
 }
 
-print("\n=== Dual Model Activity Tracker Started ===")
+print("\n=== Enhanced Dual Model Activity Tracker Started ===")
 print("Green boxes = Custom model detections")
 print("Blue boxes = COCO model detections (mapped to activities)")
+print("Tracking improvements:")
+print(f"  - Max lost frames: {MAX_LOST_FRAMES}")
+print(f"  - IoU threshold: {IOU_THRESHOLD}")
+print(f"  - Center distance threshold: {CENTER_DISTANCE_THRESHOLD}px")
 print("Press ESC to quit\n")
 
 while True:
@@ -351,12 +430,22 @@ while True:
         display_frame = annotated_frame.copy()
         
         for person_id, pdata in display_tracked_persons.items():
+            # Skip persons lost for too long
+            if pdata.get('frames_lost', 0) > MAX_LOST_FRAMES:
+                continue
+            
             bbox = pdata['bbox']
             x1, y1, x2, y2 = map(int, bbox)
             
             activity = pdata['current_activity']
             activity_data = pdata['activities'][activity]
             color = ACTIVITY_COLORS.get(activity, (255, 255, 255))
+            
+            # Dim color if temporarily lost
+            frames_lost = pdata.get('frames_lost', 0)
+            if frames_lost > 0:
+                alpha = max(0.3, 1 - (frames_lost / MAX_LOST_FRAMES))
+                color = tuple(int(c * alpha) for c in color)
             
             total_time = activity_data['total_time']
             if activity_data['start_time'] is not None:
@@ -380,19 +469,23 @@ while True:
             
             source_indicator = "🟢" if pdata['detection_source'] == 'custom' else "🔵"
             info_text = [
-                f"ID: {person_id} {source_indicator}",
+                # f"ID: {person_id} {source_indicator}",
                 f"{activity.upper()}",
-                f"({pdata['original_class']})",
-                f"Time: {time_str}"
+                # f"({pdata['original_class']})",
+                f"Time: {time_str}",
+                # f"Conf: {int(activity_data.get('conf', 0) * 100)}%"
             ]
+            
+            if frames_lost > 0:
+                info_text.append(f"Lost: {frames_lost}f")
             
             if warning_text:
                 info_text.append(warning_text)
             
             y_offset = y1 - 10
-            for i, text in enumerate(reversed(info_text)):
+            for text in reversed(info_text):
                 text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                cv2.rectangle(display_frame, 
+                cv2.rectangle(display_frame,
                             (x1, y_offset - text_size[1] - 5),
                             (x1 + text_size[0] + 10, y_offset + 5),
                             color, -1)
@@ -401,7 +494,7 @@ while True:
                 y_offset -= (text_size[1] + 10)
             
             history_y = 30
-            cv2.putText(display_frame, f"Person {person_id} Activity Log:", 
+            cv2.putText(display_frame, f"Person {person_id} Activity Log:",
                        (10, history_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             history_y += 25
             
@@ -424,15 +517,15 @@ while True:
                         else:
                             limit_info = f" [Limit: {act_limit}s]"
                     
-                    cv2.putText(display_frame, f"{act}: {time_display}{limit_info}", 
+                    cv2.putText(display_frame, f"{act}: {time_display}{limit_info}",
                                (10, history_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, act_color, 1)
                     history_y += 20
             
             history_y += 10
         
-        cv2.imshow('Dual Model Activity Tracker', display_frame)
+        cv2.imshow('Enhanced Dual Model Activity Tracker', display_frame)
     else:
-        cv2.imshow('Dual Model Activity Tracker', frame)
+        cv2.imshow('Enhanced Dual Model Activity Tracker', frame)
     
     if cv2.waitKey(1) == 27:
         frame_queue.put(None)
@@ -445,14 +538,15 @@ print("\n" + "="*50)
 print("Final Activity Statistics:")
 print("="*50)
 for person_id, pdata in tracked_persons.items():
-    print(f"\nPerson ID {person_id}:")
-    for activity, data in pdata['activities'].items():
-        total = data['total_time']
-        if pdata['current_activity'] == activity and data['start_time'] is not None:
-            total += time.time() - data['start_time']
-        if total > 0:
-            time_str = format_time(total)
-            limit = TIME_LIMITS.get(activity)
-            limit_str = f" (Limit: {limit}s)" if limit else ""
-            exceeded = " ⚠️ EXCEEDED" if limit and total >= limit else ""
-            print(f"  {activity.capitalize()}: {time_str}{limit_str}{exceeded}")
+    if pdata.get('frames_lost', 0) <= MAX_LOST_FRAMES:
+        print(f"\nPerson ID {person_id} (Source: {pdata['detection_source']} model):")
+        for activity, data in pdata['activities'].items():
+            total = data['total_time']
+            if pdata['current_activity'] == activity and data['start_time'] is not None:
+                total += time.time() - data['start_time']
+            if total > 0:
+                time_str = format_time(total)
+                limit = TIME_LIMITS.get(activity)
+                limit_str = f" (Limit: {limit}s)" if limit else ""
+                exceeded = " ⚠️ EXCEEDED" if limit and total >= limit else ""
+                print(f"  {activity.capitalize()}: {time_str}{limit_str}{exceeded}")

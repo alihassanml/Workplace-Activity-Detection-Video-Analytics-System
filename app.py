@@ -37,9 +37,9 @@ COCO_TO_ACTIVITY_MAP = {
     53: 'eating',   # pizza
     54: 'eating',   # donut
     55: 'eating',   # cake
-    59: 'sleeping',  # bed
-    57: 'sleeping',  # couch
-    67: 'phone',     # cell phone
+    57: 'couch',    # couch - for sleeping detection
+    59: 'bed',      # bed - for sleeping detection
+    67: 'phone',    # cell phone
 }
 
 # Queues for thread communication
@@ -62,19 +62,25 @@ TIME_LIMITS = {
 
 CONFIDENCE_THRESHOLDS = {
     'smoking': 0.50,
-    'eating': 0.25,
+    'eating': 0.30,
     'sleeping': 0.25,
     'phone': 0.25,
-    'person': 0.25
+    'person': 0.35,
+    'bed': 0.30,
+    'chair': 0.30,
+    'couch': 0.30
 }
 
 PLAY_SOUND_ON_START = []
-PLAY_SOUND_ON_TIME_LIMIT = ['phone']
+PLAY_SOUND_ON_TIME_LIMIT = ['phone']  # Only show time for these activities
 
-# NEW: Enhanced tracking parameters
-MAX_LOST_FRAMES = 30  # Keep tracking for 30 frames even if not detected
-IOU_THRESHOLD = 0.15  # Lower threshold for better tracking
-CENTER_DISTANCE_THRESHOLD = 150  # Maximum pixel distance for center matching
+# Enhanced tracking parameters
+MAX_LOST_FRAMES = 30
+IOU_THRESHOLD = 0.15
+CENTER_DISTANCE_THRESHOLD = 150
+
+# NEW: Track detected furniture for sleeping
+detected_furniture = {'bed': [], 'chair': [], 'couch': []}
 
 def calculate_iou(box1, box2):
     """Calculate Intersection over Union between two boxes"""
@@ -105,13 +111,16 @@ def calculate_center_distance(box1, box2):
     
     return np.sqrt((x1_center - x2_center)**2 + (y1_center - y2_center)**2)
 
+def is_person_on_furniture(person_bbox, furniture_list):
+    """Check if person overlaps with any furniture (bed/chair/couch)"""
+    for furniture_bbox in furniture_list:
+        iou = calculate_iou(person_bbox, furniture_bbox)
+        if iou > 0.1:  # If there's any overlap
+            return True
+    return False
+
 def find_best_match(detection_bbox, tracked_persons, matched_ids):
-    """
-    Find best matching person ID using multiple criteria:
-    1. IoU overlap
-    2. Center distance
-    3. Temporal consistency
-    """
+    """Find best matching person ID using multiple criteria"""
     best_match_id = None
     best_score = 0
     
@@ -119,24 +128,15 @@ def find_best_match(detection_bbox, tracked_persons, matched_ids):
         if pid in matched_ids:
             continue
         
-        # Skip if person was lost too long ago
         frames_lost = pdata.get('frames_lost', 0)
         if frames_lost > MAX_LOST_FRAMES:
             continue
         
-        # Calculate IoU
         iou = calculate_iou(detection_bbox, pdata['bbox'])
-        
-        # Calculate center distance
         center_dist = calculate_center_distance(detection_bbox, pdata['bbox'])
-        
-        # Normalize distance (closer = higher score)
         dist_score = max(0, 1 - (center_dist / CENTER_DISTANCE_THRESHOLD))
-        
-        # Combined score: weighted average of IoU and distance
         combined_score = (iou * 0.6) + (dist_score * 0.4)
         
-        # Bonus for temporal consistency
         if frames_lost == 0:
             combined_score *= 1.2
         
@@ -164,8 +164,8 @@ def play_alert_sound(alert_type):
             print(f"⏰ TIME LIMIT ALERT: Drop sound!")
 
 def detection_thread():
-    """Run YOLO detection in separate thread with dual models and improved tracking"""
-    global tracked_persons, next_person_id
+    """Run YOLO detection in separate thread with dual models and smart sleep detection"""
+    global tracked_persons, next_person_id, detected_furniture
     
     frame_count = 0
     
@@ -186,8 +186,12 @@ def detection_thread():
             coco_results = coco_model(frame, imgsz=416, conf=0.25, verbose=False)
             coco_result = coco_results[0]
             
+            # Reset furniture detections
+            detected_furniture = {'bed': [], 'chair': [], 'couch': []}
+            
             # Extract detections by activity
             detections = {activity: [] for activity in ACTIVITIES}
+            person_detections = []
             
             # Process custom model detections
             for box in custom_result.boxes:
@@ -205,6 +209,8 @@ def detection_thread():
                             'source': 'custom',
                             'original_class': class_name
                         })
+                        if class_name == 'person':
+                            person_detections.append(xyxy)
             
             # Process COCO model detections
             for box in coco_result.boxes:
@@ -216,6 +222,13 @@ def detection_thread():
                     activity = COCO_TO_ACTIVITY_MAP[cls]
                     coco_class_name = coco_model.names[cls]
                     
+                    # Track furniture separately
+                    if activity in ['bed', 'chair', 'couch']:
+                        required_conf = CONFIDENCE_THRESHOLDS.get(activity, 0.25)
+                        if conf >= required_conf:
+                            detected_furniture[activity].append(xyxy)
+                        continue
+                    
                     required_conf = CONFIDENCE_THRESHOLDS.get(activity, 0.25)
                     if conf >= required_conf:
                         detections[activity].append({
@@ -224,6 +237,20 @@ def detection_thread():
                             'source': 'coco',
                             'original_class': coco_class_name
                         })
+                        if activity == 'person':
+                            person_detections.append(xyxy)
+            
+            # Check for sleeping: only if person is on bed/chair/couch
+            all_furniture = detected_furniture['bed'] + detected_furniture['chair'] + detected_furniture['couch']
+            
+            for person_bbox in person_detections:
+                if is_person_on_furniture(person_bbox, all_furniture):
+                    detections['sleeping'].append({
+                        'bbox': person_bbox,
+                        'conf': 0.8,
+                        'source': 'smart',
+                        'original_class': 'person+furniture'
+                    })
             
             # Mark all existing persons as potentially lost
             for pid in tracked_persons:
@@ -239,11 +266,9 @@ def detection_thread():
                     det_bbox = detection['bbox']
                     det_conf = detection['conf']
                     
-                    # Find best matching person using improved algorithm
                     matched_id = find_best_match(det_bbox, tracked_persons, matched_ids)
                     
                     if matched_id is None:
-                        # Create new person
                         person_id = next_person_id
                         next_person_id += 1
                         
@@ -266,7 +291,6 @@ def detection_thread():
                         current_frame_persons[person_id]['activities'][activity_name]['start_time'] = current_time
                         current_frame_persons[person_id]['activities'][activity_name]['conf'] = det_conf
                     else:
-                        # Update existing person
                         person_id = matched_id
                         matched_ids.add(person_id)
                         
@@ -284,22 +308,19 @@ def detection_thread():
                         
                         old_activity = old_data['current_activity']
                         
-                        # Stop old activity timer if different
                         if old_activity != activity_name and old_data['activities'][old_activity]['start_time'] is not None:
                             elapsed = current_time - old_data['activities'][old_activity]['start_time']
                             current_frame_persons[person_id]['activities'][old_activity]['total_time'] += elapsed
                             current_frame_persons[person_id]['activities'][old_activity]['start_time'] = None
                         
-                        # Start or continue activity timer
                         if current_frame_persons[person_id]['activities'][activity_name]['start_time'] is None:
                             current_frame_persons[person_id]['activities'][activity_name]['start_time'] = current_time
                             current_frame_persons[person_id]['activities'][activity_name]['alerted'] = False
                             current_frame_persons[person_id]['activities'][activity_name]['time_limit_alerted'] = False
                         
-                        # Update confidence
                         current_frame_persons[person_id]['activities'][activity_name]['conf'] = det_conf
             
-            # Keep recently lost persons (within MAX_LOST_FRAMES)
+            # Keep recently lost persons
             for pid, pdata in tracked_persons.items():
                 if pid not in current_frame_persons and pdata.get('frames_lost', 0) <= MAX_LOST_FRAMES:
                     current_frame_persons[pid] = pdata.copy()
@@ -324,36 +345,35 @@ def detection_thread():
             # Create annotated frame
             annotated_frame = frame.copy()
             
-            # Draw all detections
+            # Draw furniture detections (for debugging)
+            for furniture_type, furniture_list in detected_furniture.items():
+                for furn_bbox in furniture_list:
+                    x1, y1, x2, y2 = map(int, furn_bbox)
+                    cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), (200, 200, 200), 1)
+                    cv2.putText(annotated_frame, furniture_type, (x1, y1 - 5),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.4, (200, 200, 200), 1)
+            
+            # Draw all person detections
             for person_id, pdata in tracked_persons.items():
                 if pdata.get('frames_lost', 0) <= MAX_LOST_FRAMES:
                     bbox = pdata['bbox']
                     x1, y1, x2, y2 = map(int, bbox)
                     activity = pdata['current_activity']
                     source = pdata['detection_source']
-                    original_class = pdata['original_class']
                     
-                    # Color based on source
                     if source == 'custom':
-                        color = (0, 255, 0)  # Green for custom model
+                        color = (0, 255, 0)
+                    elif source == 'smart':
+                        color = (255, 0, 255)  # Purple for smart sleep detection
                     else:
-                        color = (255, 0, 0)  # Blue for COCO model
+                        color = (255, 0, 0)
                     
-                    # Dim color if temporarily lost
                     frames_lost = pdata.get('frames_lost', 0)
                     if frames_lost > 0:
                         alpha = max(0.3, 1 - (frames_lost / MAX_LOST_FRAMES))
                         color = tuple(int(c * alpha) for c in color)
                     
-                    # Draw box
                     cv2.rectangle(annotated_frame, (x1, y1), (x2, y2), color, 2)
-                    
-                    # Label with mapped activity and original class
-                    label = f"ID:{person_id} {activity.upper()} ({original_class})"
-                    if frames_lost > 0:
-                        label += f" [Lost:{frames_lost}]"
-                    cv2.putText(annotated_frame, label, (x1, y1 - 10),
-                               cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
             
             if result_queue.full():
                 result_queue.get()
@@ -363,9 +383,9 @@ def detection_thread():
 detector = threading.Thread(target=detection_thread, daemon=True)
 detector.start()
 
-cap = cv2.VideoCapture(0)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1600)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
 
 annotated_frame = None
 frame_count = 0
@@ -380,13 +400,14 @@ ACTIVITY_COLORS = {
     'person': (128, 128, 128)
 }
 
-print("\n=== Enhanced Dual Model Activity Tracker Started ===")
-print("Green boxes = Custom model detections")
-print("Blue boxes = COCO model detections (mapped to activities)")
-print("Tracking improvements:")
-print(f"  - Max lost frames: {MAX_LOST_FRAMES}")
-print(f"  - IoU threshold: {IOU_THRESHOLD}")
-print(f"  - Center distance threshold: {CENTER_DISTANCE_THRESHOLD}px")
+# NEW: Track active activities for display
+active_activities = set()
+
+print("\n=== Enhanced Smart Activity Tracker Started ===")
+print("✓ Smart sleep detection: Only when person is on bed/chair/couch")
+print("✓ Activity text on RIGHT side of box")
+print("✓ Active activities shown on screen")
+print(f"✓ Time shown only for: {', '.join(PLAY_SOUND_ON_TIME_LIMIT)}")
 print("Press ESC to quit\n")
 
 while True:
@@ -402,18 +423,20 @@ while True:
     if not result_queue.empty():
         annotated_frame, display_tracked_persons, current_time = result_queue.get()
         
+        # Update active activities
+        active_activities = set()
+        for person_id, pdata in display_tracked_persons.items():
+            if pdata.get('frames_lost', 0) <= MAX_LOST_FRAMES:
+                active_activities.add(pdata['current_activity'])
+        
         for person_id, pdata in display_tracked_persons.items():
             activity = pdata['current_activity']
             activity_data = pdata['activities'][activity]
             
             if not activity_data['alerted']:
-                source = pdata['detection_source']
-                original_class = pdata['original_class']
-                # print(f"⚠️ Person ID {person_id} started: {activity.upper()} (detected as '{original_class}' by {source} model)")
                 activity_data['alerted'] = True
                 
                 if activity in PLAY_SOUND_ON_START:
-                    print(f"🔊 Playing start sound for {activity}")
                     threading.Thread(target=play_alert_sound, args=("start",), daemon=True).start()
 
             if activity_data.get('exceeded_time_limit', False) and activity_data.get('time_limit_alerted', False):
@@ -421,17 +444,48 @@ while True:
                 print(f"🚨 WARNING: Person ID {person_id} has been using {activity.upper()} for more than {time_limit} seconds!")
                 
                 if activity in PLAY_SOUND_ON_TIME_LIMIT:
-                    print(f"🔊 Playing time limit sound for {activity}")
                     threading.Thread(target=play_alert_sound, args=("time_limit",), daemon=True).start()
                 
                 activity_data['exceeded_time_limit'] = False
     
     if annotated_frame is not None:
         display_frame = annotated_frame.copy()
+        frame_height, frame_width = display_frame.shape[:2]
         
+        # Display active activities on screen (top-right)
+        activity_panel_y = 30
+        title_text = "Active Activities:"
+        title_size = cv2.getTextSize(title_text, cv2.FONT_HERSHEY_SIMPLEX, 0.7, 2)[0]
+        title_x = frame_width - title_size[0] - 10
+        
+        cv2.putText(display_frame, title_text, (title_x, activity_panel_y),
+                   cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+        activity_panel_y += 30
+        
+        if active_activities:
+            for activity in sorted(active_activities):
+                color = ACTIVITY_COLORS.get(activity, (255, 255, 255))
+                activity_text = f"{activity.upper()}"
+                activity_size = cv2.getTextSize(activity_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
+                activity_x = frame_width - activity_size[0] - 10
+                
+                cv2.putText(display_frame, activity_text, (activity_x, activity_panel_y),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
+                activity_panel_y += 25
+        else:
+            none_text = "None"
+            none_size = cv2.getTextSize(none_text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0]
+            none_x = frame_width - none_size[0] - 10
+            
+            cv2.putText(display_frame, none_text, (none_x, activity_panel_y),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.6, (128, 128, 128), 1)
+        
+        # Draw person boxes with text on RIGHT side
         for person_id, pdata in display_tracked_persons.items():
-            # Skip persons lost for too long
-            if pdata.get('frames_lost', 0) > MAX_LOST_FRAMES:
+            frames_lost = pdata.get('frames_lost', 0)
+            
+            # Skip lost persons completely - don't show them at all
+            if frames_lost > 0:
                 continue
             
             bbox = pdata['bbox']
@@ -441,18 +495,10 @@ while True:
             activity_data = pdata['activities'][activity]
             color = ACTIVITY_COLORS.get(activity, (255, 255, 255))
             
-            # Dim color if temporarily lost
-            frames_lost = pdata.get('frames_lost', 0)
-            if frames_lost > 0:
-                alpha = max(0.3, 1 - (frames_lost / MAX_LOST_FRAMES))
-                color = tuple(int(c * alpha) for c in color)
-            
             total_time = activity_data['total_time']
             if activity_data['start_time'] is not None:
                 current_session = current_time - activity_data['start_time']
                 total_time += current_session
-            
-            time_str = format_time(total_time)
             
             time_limit = TIME_LIMITS.get(activity)
             warning_text = ""
@@ -467,65 +513,41 @@ while True:
             
             cv2.rectangle(display_frame, (x1, y1), (x2, y2), color, 3)
             
-            source_indicator = "🟢" if pdata['detection_source'] == 'custom' else "🔵"
-            info_text = [
-                # f"ID: {person_id} {source_indicator}",
-                f"{activity.upper()}",
-                # f"({pdata['original_class']})",
-                f"Time: {time_str}",
-                # f"Conf: {int(activity_data.get('conf', 0) * 100)}%"
-            ]
+            # Build info text - ONLY show time for activities in PLAY_SOUND_ON_TIME_LIMIT
+            info_text = [f"{activity.upper()}"]
             
-            if frames_lost > 0:
-                info_text.append(f"Lost: {frames_lost}f")
+            if activity in PLAY_SOUND_ON_TIME_LIMIT:
+                time_str = format_time(total_time)
+                info_text.append(f"Time: {time_str}")
             
             if warning_text:
                 info_text.append(warning_text)
             
-            y_offset = y1 - 10
-            for text in reversed(info_text):
+            # Draw text on RIGHT side of box (fixed position)
+            # Draw text at TOP CENTER of box
+            box_center_x = (x1 + x2) // 2
+            text_y = y1 + 20
+
+            for text in info_text:
                 text_size = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 2)[0]
-                cv2.rectangle(display_frame,
-                            (x1, y_offset - text_size[1] - 5),
-                            (x1 + text_size[0] + 10, y_offset + 5),
-                            color, -1)
-                cv2.putText(display_frame, text, (x1 + 5, y_offset),
-                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-                y_offset -= (text_size[1] + 10)
-            
-            history_y = 30
-            cv2.putText(display_frame, f"Person {person_id} Activity Log:",
-                       (10, history_y), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-            history_y += 25
-            
-            for act in ACTIVITIES:
-                act_data = pdata['activities'][act]
-                act_time = act_data['total_time']
-                if pdata['current_activity'] == act and act_data['start_time'] is not None:
-                    act_time += current_time - act_data['start_time']
                 
-                if act_time > 0:
-                    time_display = format_time(act_time)
-                    act_color = ACTIVITY_COLORS.get(act, (255, 255, 255))
-                    
-                    limit_info = ""
-                    act_limit = TIME_LIMITS.get(act)
-                    if act_limit is not None:
-                        if act_time >= act_limit:
-                            limit_info = " [EXCEEDED]"
-                            act_color = (0, 0, 255)
-                        else:
-                            limit_info = f" [Limit: {act_limit}s]"
-                    
-                    cv2.putText(display_frame, f"{act}: {time_display}{limit_info}",
-                               (10, history_y), cv2.FONT_HERSHEY_SIMPLEX, 0.5, act_color, 1)
-                    history_y += 20
-            
-            history_y += 10
+                # Center text horizontally above the box
+                text_x = box_center_x - text_size[0] // 2
+                
+                # Draw background rectangle
+                cv2.rectangle(display_frame,
+                            (text_x - 5, text_y - text_size[1] - 5),
+                            (text_x + text_size[0] + 5, text_y + 5),
+                            color, -1)
+                
+                # Draw text
+                cv2.putText(display_frame, text, (text_x, text_y),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
+                text_y += text_size[1] + 15
         
-        cv2.imshow('Enhanced Dual Model Activity Tracker', display_frame)
+        cv2.imshow('Smart Activity Tracker', display_frame)
     else:
-        cv2.imshow('Enhanced Dual Model Activity Tracker', frame)
+        cv2.imshow('Smart Activity Tracker', frame)
     
     if cv2.waitKey(1) == 27:
         frame_queue.put(None)
@@ -539,7 +561,7 @@ print("Final Activity Statistics:")
 print("="*50)
 for person_id, pdata in tracked_persons.items():
     if pdata.get('frames_lost', 0) <= MAX_LOST_FRAMES:
-        print(f"\nPerson ID {person_id} (Source: {pdata['detection_source']} model):")
+        print(f"\nPerson ID {person_id}:")
         for activity, data in pdata['activities'].items():
             total = data['total_time']
             if pdata['current_activity'] == activity and data['start_time'] is not None:

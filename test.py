@@ -288,25 +288,25 @@ class ControlPanel:
         
         # Check sliders
         activity = self.selected_activity
-        conf_slider_y = 225
+        conf_slider_y = 255  # Aligned with visual draw position
         slider_x = 20
         slider_width = self.width - 40
         
-        # Confidence slider click
-        if slider_x <= x <= slider_x + slider_width and conf_slider_y <= y <= conf_slider_y + 10:
+        # Confidence slider click (User requested 240-260 range)
+        if slider_x <= x <= slider_x + slider_width and 240 <= y <= 265:
             self.dragging_slider = 'conf'
             self.update_active_slider(x)
             return True
             
         # Time limit slider click
-        time_slider_y = conf_slider_y + 45
-        if slider_x <= x <= slider_x + slider_width and time_slider_y <= y <= time_slider_y + 10:
+        time_slider_y = 310  # Aligned with visual draw position
+        if slider_x <= x <= slider_x + slider_width and time_slider_y - 15 <= y <= time_slider_y + 15:
             self.dragging_slider = 'time'
             self.update_active_slider(x)
             return True
         
         # Sound checkboxes
-        checkbox_y_start = 280
+        checkbox_y_start = 370  # Aligned with visual draw position (was 280)
         
         # On Start checkbox
         if 20 <= x <= 40 and checkbox_y_start <= y <= checkbox_y_start + 20:
@@ -317,7 +317,7 @@ class ControlPanel:
             return True
         
         # On Time Limit checkbox
-        checkbox_y_start += 30
+        checkbox_y_start += 30  # 400
         if 20 <= x <= 40 and checkbox_y_start <= y <= checkbox_y_start + 20:
             if activity in settings.sound_on_time_limit:
                 settings.sound_on_time_limit.remove(activity)
@@ -326,7 +326,7 @@ class ControlPanel:
             return True
         
         # Save button
-        save_btn_y = 450
+        save_btn_y = 635  # Moved to match visual position (was 450)
         if 10 <= x <= self.width - 10 and save_btn_y <= y <= save_btn_y + 35:
             settings.save_settings()
             print("✓ Settings saved!")
@@ -638,8 +638,8 @@ detector = threading.Thread(target=detection_thread, daemon=True)
 detector.start()
 
 cap = cv2.VideoCapture(0, cv2.CAP_V4L2)
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1600)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 640)
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
 
 annotated_frame = None
 frame_count = 0

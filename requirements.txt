@@ -18,6 +18,7 @@ python-multipart
 requests
 jinja2
 aiofiles
+playsound
 sqlalchemy
 tqdm
 pydantic

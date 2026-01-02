@@ -131,13 +131,8 @@ class ControlPanel:
         button_width = 75
         button_height = 30
         for i, activity in enumerate(ACTIVITIES):
-            if i < 3:
-                row = 0
-                col = i
-            else:
-                row = 1
-                col = i - 3
-                
+            row = i // 2
+            col = i % 2
             x = 10 + col * (button_width + 10)
             y_btn = y + row * (button_height + 10)
             
@@ -272,13 +267,8 @@ class ControlPanel:
         y_start = 85
         
         for i, activity in enumerate(ACTIVITIES):
-            if i < 3:
-                row = 0
-                col = i
-            else:
-                row = 1
-                col = i - 3
-            
+            row = i // 2
+            col = i % 2
             btn_x = 10 + col * (button_width + 10)
             btn_y = y_start + row * (button_height + 10)
             
@@ -286,26 +276,8 @@ class ControlPanel:
                 self.selected_activity = activity
                 return True
         
-        # Check sliders
-        activity = self.selected_activity
-        conf_slider_y = 225
-        slider_x = 20
-        slider_width = self.width - 40
-        
-        # Confidence slider click
-        if slider_x <= x <= slider_x + slider_width and conf_slider_y <= y <= conf_slider_y + 10:
-            self.dragging_slider = 'conf'
-            self.update_active_slider(x)
-            return True
-            
-        # Time limit slider click
-        time_slider_y = conf_slider_y + 45
-        if slider_x <= x <= slider_x + slider_width and time_slider_y <= y <= time_slider_y + 10:
-            self.dragging_slider = 'time'
-            self.update_active_slider(x)
-            return True
-        
         # Sound checkboxes
+        activity = self.selected_activity
         checkbox_y_start = 280
         
         # On Start checkbox
@@ -334,24 +306,29 @@ class ControlPanel:
         
         return False
     
-    def update_active_slider(self, x):
-        """Update the currently dragged slider based on x position"""
-        if not self.dragging_slider:
-            return
-
+    def handle_drag(self, x, y):
+        """Handle mouse drag for sliders"""
         activity = self.selected_activity
+        
+        # Confidence slider
+        conf_slider_y = 225
         slider_x = 20
         slider_width = self.width - 40
         
-        ratio = (x - slider_x) / slider_width
-        ratio = max(0.0, min(1.0, ratio))
-        
-        if self.dragging_slider == 'conf':
-            settings.confidence_thresholds[activity] = round(ratio, 2)
-        elif self.dragging_slider == 'time':
-            new_time = int(ratio * 300)
-            settings.time_limits[activity] = new_time
-            return True
+        if slider_x <= x <= slider_x + slider_width:
+            if conf_slider_y <= y <= conf_slider_y + 10:
+                ratio = (x - slider_x) / slider_width
+                new_conf = max(0.0, min(1.0, ratio))
+                settings.confidence_thresholds[activity] = round(new_conf, 2)
+                return True
+            
+            # Time limit slider
+            time_slider_y = conf_slider_y + 45
+            if time_slider_y <= y <= time_slider_y + 10:
+                ratio = (x - slider_x) / slider_width
+                new_time = int(max(0, min(300, ratio * 300)))
+                settings.time_limits[activity] = new_time
+                return True
         
         return False
 
@@ -360,17 +337,16 @@ control_panel = ControlPanel()
 # Mouse callback
 def mouse_callback(event, x, y, flags, param):
     """Handle mouse events"""
-    if not control_panel.show:
+    if not control_panel.show or x >= control_panel.width:
         return
     
-    # Allow dragging outside panel, but other clicks must be inside
     if event == cv2.EVENT_LBUTTONDOWN:
-        if x < control_panel.width:
-            control_panel.handle_click(x, y)
+        control_panel.handle_click(x, y)
+        control_panel.dragging_slider = True
     elif event == cv2.EVENT_LBUTTONUP:
-        control_panel.dragging_slider = None
+        control_panel.dragging_slider = False
     elif event == cv2.EVENT_MOUSEMOVE and control_panel.dragging_slider:
-        control_panel.update_active_slider(x)
+        control_panel.handle_drag(x, y)
 
 def calculate_iou(box1, box2):
     """Calculate Intersection over Union between two boxes"""
